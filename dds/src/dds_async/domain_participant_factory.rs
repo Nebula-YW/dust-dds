@@ -1,7 +1,7 @@
 use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
 use core::ops::DerefMut;
 
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal};
 
 use super::domain_participant::DomainParticipantAsync;
 use crate::{
@@ -78,7 +78,7 @@ pub struct DomainParticipantFactoryAsync<T: TransportParticipantFactory> {
     transport: embassy_sync::mutex::Mutex<CriticalSectionRawMutex, T>,
     configuration: embassy_sync::mutex::Mutex<CriticalSectionRawMutex, DustDdsConfiguration>,
     worker_task: alloc::boxed::Box<dyn TaskHandle>,
-    run_loop: Arc<core::sync::atomic::AtomicBool>,
+    stop: Arc<Signal<CriticalSectionRawMutex, ()>>,
 }
 
 impl<T: TransportParticipantFactory> DomainParticipantFactoryAsync<T> {
@@ -285,82 +285,89 @@ impl<T: TransportParticipantFactory> DomainParticipantFactoryAsync<T> {
                 runtime,
                 dcps_sender.clone(),
             );
-        let run_loop = Arc::new(core::sync::atomic::AtomicBool::new(true));
-        let run_loop_clone = run_loop.clone();
+        let stop = Arc::new(Signal::new());
+        let worker_stop = stop.clone();
         let worker_task = spawner_handle.spawn(async move {
             let span = tracing::trace_span!("dds_actor_loop");
             let _enter = span.enter();
-            while run_loop_clone.load(core::sync::atomic::Ordering::Relaxed) {
-                let now = domain_participant_factory.runtime.clock().now();
-                let next_task_time = domain_participant_factory.time_until_next_event(now);
+            select_future(worker_stop.wait(), async {
+                loop {
+                    let now = domain_participant_factory.runtime.clock().now();
+                    let next_task_time = domain_participant_factory.time_until_next_event(now);
 
-                if let Some(next_task_time) = next_task_time {
-                    match select3_future(
-                        rpc_mailbox.receive_request(),
-                        timer_handle.delay(next_task_time.into()),
-                        wire_receiver.receive(),
-                    )
-                    .await
-                    {
-                        Either3::A(user_mail) => {
-                            let now = domain_participant_factory.runtime.clock().now();
-                            let reply = domain_participant_factory.handle(user_mail, now);
-                            rpc_mailbox.send_reply(reply).await;
-                        }
-                        Either3::B(_) => {
-                            let now = domain_participant_factory.runtime.clock().now();
-                            for dp in &mut domain_participant_factory.domain_participant_list {
-                                dp.remove_stale_participants(now);
-                                dp.check_missed_reader_deadline(now);
-                                dp.check_missed_writer_deadline(now);
-                                dp.remove_stale_writer_samples(now);
-                                dp.remove_stale_reader_samples(now);
-                                dp.check_pending_writer_sample_timeout(now);
-                                dp.process_pending_write_samples(now);
-                                dp.announce_participant_if_needed(now);
-                                dp.notify_find_topic_senders(now);
-                                dp.poke(now);
-                            }
-                        }
-                        Either3::C(wire_mail) => {
-                            let now = domain_participant_factory.runtime.clock().now();
-                            if let Some(dp) = domain_participant_factory
-                                .domain_participant_list
-                                .iter_mut()
-                                .find(|x| x.get_instance_handle() == &wire_mail.participant_handle)
-                            {
-                                dp.handle_data(&wire_mail.data_message, now);
-                                dp.process_builtin_cache_changes(now);
-                                dp.process_user_defined_received_cache_changes(now);
-                                dp.request_topic_type_representation(now);
-                            }
-                        }
-                    };
-                } else {
-                    match select_future(rpc_mailbox.receive_request(), wire_receiver.receive())
+                    if let Some(next_task_time) = next_task_time {
+                        match select3_future(
+                            rpc_mailbox.receive_request(),
+                            timer_handle.delay(next_task_time.into()),
+                            wire_receiver.receive(),
+                        )
                         .await
-                    {
-                        Either::A(user_mail) => {
-                            let now = domain_participant_factory.runtime.clock().now();
-                            let reply = domain_participant_factory.handle(user_mail, now);
-                            rpc_mailbox.send_reply(reply).await;
-                        }
-                        Either::B(wire_mail) => {
-                            let now = domain_participant_factory.runtime.clock().now();
-                            if let Some(dp) = domain_participant_factory
-                                .domain_participant_list
-                                .iter_mut()
-                                .find(|x| x.get_instance_handle() == &wire_mail.participant_handle)
-                            {
-                                dp.handle_data(&wire_mail.data_message, now);
-                                dp.process_builtin_cache_changes(now);
-                                dp.process_user_defined_received_cache_changes(now);
-                                dp.request_topic_type_representation(now);
+                        {
+                            Either3::A(user_mail) => {
+                                let now = domain_participant_factory.runtime.clock().now();
+                                let reply = domain_participant_factory.handle(user_mail, now);
+                                rpc_mailbox.send_reply(reply).await;
                             }
-                        }
-                    };
+                            Either3::B(_) => {
+                                let now = domain_participant_factory.runtime.clock().now();
+                                for dp in &mut domain_participant_factory.domain_participant_list {
+                                    dp.remove_stale_participants(now);
+                                    dp.check_missed_reader_deadline(now);
+                                    dp.check_missed_writer_deadline(now);
+                                    dp.remove_stale_writer_samples(now);
+                                    dp.remove_stale_reader_samples(now);
+                                    dp.check_pending_writer_sample_timeout(now);
+                                    dp.process_pending_write_samples(now);
+                                    dp.announce_participant_if_needed(now);
+                                    dp.notify_find_topic_senders(now);
+                                    dp.poke(now);
+                                }
+                            }
+                            Either3::C(wire_mail) => {
+                                let now = domain_participant_factory.runtime.clock().now();
+                                if let Some(dp) = domain_participant_factory
+                                    .domain_participant_list
+                                    .iter_mut()
+                                    .find(|x| {
+                                        x.get_instance_handle() == &wire_mail.participant_handle
+                                    })
+                                {
+                                    dp.handle_data(&wire_mail.data_message, now);
+                                    dp.process_builtin_cache_changes(now);
+                                    dp.process_user_defined_received_cache_changes(now);
+                                    dp.request_topic_type_representation(now);
+                                }
+                            }
+                        };
+                    } else {
+                        match select_future(rpc_mailbox.receive_request(), wire_receiver.receive())
+                            .await
+                        {
+                            Either::A(user_mail) => {
+                                let now = domain_participant_factory.runtime.clock().now();
+                                let reply = domain_participant_factory.handle(user_mail, now);
+                                rpc_mailbox.send_reply(reply).await;
+                            }
+                            Either::B(wire_mail) => {
+                                let now = domain_participant_factory.runtime.clock().now();
+                                if let Some(dp) = domain_participant_factory
+                                    .domain_participant_list
+                                    .iter_mut()
+                                    .find(|x| {
+                                        x.get_instance_handle() == &wire_mail.participant_handle
+                                    })
+                                {
+                                    dp.handle_data(&wire_mail.data_message, now);
+                                    dp.process_builtin_cache_changes(now);
+                                    dp.process_user_defined_received_cache_changes(now);
+                                    dp.request_topic_type_representation(now);
+                                }
+                            }
+                        };
+                    }
                 }
-            }
+            })
+            .await;
         });
         Self {
             dcps_sender,
@@ -371,7 +378,7 @@ impl<T: TransportParticipantFactory> DomainParticipantFactoryAsync<T> {
             transport: Mutex::new(transport),
             configuration: Mutex::new(configuration),
             worker_task: Box::new(worker_task),
-            run_loop,
+            stop,
         }
     }
 
@@ -399,8 +406,50 @@ impl<T: TransportParticipantFactory> DomainParticipantFactoryAsync<T> {
 
     #[doc(hidden)]
     pub fn shutdown(&self) {
-        self.run_loop
-            .store(false, core::sync::atomic::Ordering::Relaxed);
+        self.dcps_sender.close();
+        self.stop.signal(());
         self.worker_task.join();
+        // Queued create requests can own transport resources even after their callers are cancelled.
+        self.dcps_sender.clear_pending();
+    }
+}
+
+#[cfg(all(test, feature = "rtps_udp_transport"))]
+mod lifecycle_tests {
+    use super::*;
+    use crate::rtps_udp_transport::udp_transport::RtpsUdpTransportParticipantFactory;
+    use crate::transport::interface::TransportParticipantFactory;
+    use std::net::UdpSocket;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn deleting_transport_cancels_receiver_blocked_on_full_wire_queue() {
+        let channel = Arc::new(WireChannel::new());
+        let handle = InstanceHandle::new([0; 16]);
+        for _ in 0..WIRE_CHANNEL_SIZE {
+            channel
+                .try_send(WireMail {
+                    participant_handle: handle,
+                    data_message: vec![0],
+                })
+                .ok()
+                .unwrap();
+        }
+        let sender = WireSender {
+            channel: channel.clone(),
+        };
+        let mut factory = RtpsUdpTransportParticipantFactory::default();
+        factory.set_interface_name(Some("lo0".into()));
+        let transport = factory.create_participant(72, TransportDataReceiver::new(handle, sender));
+        let port = transport.default_unicast_locator_list[0].port as u16;
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .send_to(&[1], (std::net::Ipv4Addr::LOCALHOST, port))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(channel.is_full());
+        let start = Instant::now();
+        drop(transport);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

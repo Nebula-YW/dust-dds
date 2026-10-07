@@ -77,9 +77,26 @@ pub fn block_on<T>(f: impl Future<Output = T>) -> T {
     }
 }
 
+// The last queue owner must disconnect before waking an idle executor.
+struct TaskQueueSender {
+    sender: Option<Sender<Arc<Task>>>,
+    thread: Thread,
+}
+impl TaskQueueSender {
+    fn send(&self, task: Arc<Task>) -> Result<(), std::sync::mpsc::SendError<Arc<Task>>> {
+        self.sender.as_ref().expect("Live queue sender").send(task)
+    }
+}
+impl Drop for TaskQueueSender {
+    fn drop(&mut self) {
+        self.sender.take();
+        self.thread.unpark();
+    }
+}
+
 pub struct Task {
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    task_sender: Sender<Arc<Task>>,
+    task_sender: Arc<TaskQueueSender>,
     thread_handle: Thread,
     finished: AtomicBool,
     is_queued: AtomicBool,
@@ -138,7 +155,7 @@ impl Wake for Task {
 
 #[derive(Clone)]
 pub struct ExecutorHandle {
-    task_sender: Sender<Arc<Task>>,
+    task_sender: Arc<TaskQueueSender>,
     thread_handle: Thread,
 }
 
@@ -358,7 +375,7 @@ impl Timer for TimerHandle {
 }
 
 pub struct Executor {
-    task_sender: Sender<Arc<Task>>,
+    task_sender: Arc<TaskQueueSender>,
     executor_thread_handle: JoinHandle<()>,
     timer_state: Arc<TimerState>,
 }
@@ -423,6 +440,10 @@ impl Executor {
             })
             .expect("failed to spawn thread");
 
+        let task_sender = Arc::new(TaskQueueSender {
+            sender: Some(task_sender),
+            thread: executor_thread_handle.thread().clone(),
+        });
         Self {
             task_sender,
             executor_thread_handle,

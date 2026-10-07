@@ -1,3 +1,4 @@
+use crate::runtime::{Either, select_future};
 use crate::{
     infrastructure::error::{DdsError, DdsResult},
     std_runtime::{self},
@@ -11,11 +12,14 @@ use crate::{
 };
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use dust_dds::transport::types::{LOCATOR_KIND_UDP_V4, Locator};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use socket2::Socket;
 use std::{
     net::{ToSocketAddrs, UdpSocket},
     sync::Arc,
+    thread::JoinHandle,
+    time::Duration,
 };
 use tracing::info;
 
@@ -107,7 +111,7 @@ impl RtpsUdpTransportParticipantFactory {
     /// separate message using RTPS data fragments
     pub fn set_fragment_size(&mut self, fragment_size: usize) -> DdsResult<&mut Self> {
         let fragment_size_range = 8..=65000;
-        if !fragment_size_range.contains(&self.fragment_size) {
+        if !fragment_size_range.contains(&fragment_size) {
             return Err(DdsError::BadParameter);
         }
         self.fragment_size = fragment_size;
@@ -211,71 +215,35 @@ impl TransportParticipantFactory for RtpsUdpTransportParticipantFactory {
             .unwrap(),
         );
 
-        let message_writer =
-            MessageWriter::new(default_unicast_socket.try_clone().expect("Socket cloning"));
+        let mut receivers = ReceiveThreads::default();
+        receivers.spawn(
+            "Dust metatraffic multicast",
+            metatraffic_multicast_socket,
+            data_channel_sender.clone(),
+        );
+        receivers.spawn(
+            "Dust metatraffic unicast",
+            metatraffic_unicast_socket,
+            data_channel_sender.clone(),
+        );
+        receivers.spawn(
+            "Dust user unicast",
+            Arc::new(default_unicast_socket.try_clone().expect("Socket cloning")),
+            data_channel_sender,
+        );
 
-        let global_participant = RtpsTransportParticipant {
-            message_writer: Box::new(message_writer.clone()),
+        RtpsTransportParticipant {
+            message_writer: Box::new(MessageWriter {
+                socket: default_unicast_socket,
+                buffer: Box::new([0; MAX_DATAGRAM_SIZE]),
+                _receivers: receivers,
+            }),
             default_unicast_locator_list,
             metatraffic_unicast_locator_list,
             metatraffic_multicast_locator_list,
             default_multicast_locator_list: Vec::new(),
             fragment_size: self.fragment_size,
-        };
-
-        let data_channel_sender_clone = data_channel_sender.clone();
-
-        std::thread::Builder::new()
-            .name("SomethingOnMetatrafficMulticastSocket".to_string())
-            .spawn(move || {
-                let mut buf = [0; MAX_DATAGRAM_SIZE];
-                loop {
-                    if let Ok(size) = metatraffic_multicast_socket.recv(&mut buf) {
-                        if size > 0 {
-                            std_runtime::executor::block_on(
-                                data_channel_sender_clone.receive_message(buf[..size].to_vec()),
-                            );
-                        }
-                    }
-                }
-            })
-            .expect("failed to spawn thread");
-
-        let data_channel_sender_clone = data_channel_sender.clone();
-        std::thread::Builder::new()
-            .name("SomethingOnMetatrafficUnicastSocket".to_string())
-            .spawn(move || {
-                let mut buf = [0; MAX_DATAGRAM_SIZE];
-                loop {
-                    if let Ok(size) = metatraffic_unicast_socket.recv(&mut buf) {
-                        if size > 0 {
-                            std_runtime::executor::block_on(
-                                data_channel_sender_clone.receive_message(buf[..size].to_vec()),
-                            )
-                        }
-                    }
-                }
-            })
-            .expect("failed to spawn thread");
-
-        let data_channel_sender_clone = data_channel_sender.clone();
-        std::thread::Builder::new()
-            .name("SomethingOnDefaultUnicastSocket".to_string())
-            .spawn(move || {
-                let mut buf = [0; MAX_DATAGRAM_SIZE];
-                loop {
-                    if let Ok(size) = default_unicast_socket.recv(&mut buf) {
-                        if size > 0 {
-                            std_runtime::executor::block_on(
-                                data_channel_sender_clone.receive_message(buf[..size].to_vec()),
-                            )
-                        }
-                    }
-                }
-            })
-            .expect("failed to spawn thread");
-
-        global_participant
+        }
     }
 }
 
@@ -355,28 +323,63 @@ impl UdpLocator {
 struct MessageWriter {
     socket: UdpSocket,
     buffer: Box<[u8; MAX_DATAGRAM_SIZE]>,
+    _receivers: ReceiveThreads,
 }
 
-impl Clone for MessageWriter {
-    fn clone(&self) -> Self {
-        Self {
-            socket: self.socket.try_clone().expect("Socket cloning"),
-            buffer: vec![0u8; MAX_DATAGRAM_SIZE]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap(),
-        }
+type StopSignal = Signal<CriticalSectionRawMutex, ()>;
+
+#[derive(Default)]
+struct ReceiveThreads {
+    threads: Vec<(Arc<StopSignal>, JoinHandle<()>)>,
+}
+
+impl ReceiveThreads {
+    fn spawn(&mut self, name: &str, socket: Arc<UdpSocket>, receiver: TransportDataReceiver) {
+        // Bound idle recv latency; a separate signal cancels a send blocked on the wire queue.
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("Receive timeout");
+        let stop = Arc::new(StopSignal::new());
+        let thread_stop = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                let mut buf = [0; MAX_DATAGRAM_SIZE];
+                while !thread_stop.signaled() {
+                    match socket.recv(&mut buf) {
+                        Ok(size) if size > 0 => {
+                            if let Either::A(()) = std_runtime::executor::block_on(select_future(
+                                thread_stop.wait(),
+                                receiver.receive_message(buf[..size].to_vec()),
+                            )) {
+                                break;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(_) => break,
+                    }
+                }
+            })
+            .expect("Receive thread");
+        self.threads.push((stop, thread));
     }
 }
 
-impl MessageWriter {
-    fn new(socket: UdpSocket) -> Self {
-        Self {
-            socket,
-            buffer: vec![0u8; MAX_DATAGRAM_SIZE]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap(),
+impl Drop for ReceiveThreads {
+    fn drop(&mut self) {
+        // Signal all threads before joining: deletion runs on the wire queue consumer itself.
+        for (stop, _) in &self.threads {
+            stop.signal(());
+        }
+        for (_, thread) in self.threads.drain(..) {
+            let _ = thread.join();
         }
     }
 }
