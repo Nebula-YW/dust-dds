@@ -921,8 +921,8 @@ any_const_type = { "any" }
 annotation_appl = { "@" ~ scoped_name ~ ("(" ~ annotation_appl_params ~ ")")? }
 // (226)
 annotation_appl_params = {
-    const_expr
-    | annotation_appl_param ~ ("," ~ annotation_appl_param)*
+    annotation_appl_param ~ ("," ~ annotation_appl_param)*
+    | const_expr
 }
 // (227)
 annotation_appl_param = { identifier ~ "=" ~ const_expr }

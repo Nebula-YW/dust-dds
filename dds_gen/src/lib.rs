@@ -2,6 +2,9 @@ mod generator;
 mod parser;
 mod preprocessor;
 
+#[cfg(feature = "parser-api")]
+pub mod syntax;
+
 use pest::Parser;
 use std::path::Path;
 
