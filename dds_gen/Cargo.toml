@@ -16,6 +16,10 @@ repository.workspace = true
 name = "dust_dds_gen"
 path = "src/lib.rs"
 
+[features]
+default = []
+parser-api = []
+
 [[bin]]
 name = "dust_dds_gen"
 path = "src/executable/main.rs"
