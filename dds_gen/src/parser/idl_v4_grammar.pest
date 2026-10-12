@@ -173,7 +173,7 @@ definition = {
 
 }
 // (3)
-module_dcl = { "module" ~ identifier ~ "{" ~ definition+ ~ "}" }
+module_dcl = { annotation_appl* ~ "module" ~ identifier ~ "{" ~ definition+ ~ "}" }
 // (4)
 scoped_name = ${ "::"? ~ identifier ~ ("::" ~ identifier)* }
 // (5)
@@ -419,7 +419,7 @@ union_dcl = {
 // (50)
 union_def = { annotation_appl* ~ "union" ~ identifier ~ "switch" ~ "(" ~ switch_type_spec ~ ")" ~ "{" ~ switch_body ~ "}" }
 // (51)
-switch_type_spec = {
+switch_type_spec = { annotation_appl* ~ (
     integer_type
     | char_type
     | boolean_type
@@ -427,7 +427,7 @@ switch_type_spec = {
     // (196)
     | wide_char_type
     | octet_type
-}
+)}
 // (52)
 switch_body = { case+ }
 // (53)
@@ -438,7 +438,7 @@ case_label = {
     | "default" ~ ":"
 }
 // (55)
-element_spec = { type_spec ~ declarator }
+element_spec = { annotation_appl* ~ type_spec ~ declarator }
 // (56)
 union_forward_dcl = { "union" ~ identifier }
 // (57)
