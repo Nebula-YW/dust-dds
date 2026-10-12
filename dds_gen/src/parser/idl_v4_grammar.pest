@@ -869,9 +869,9 @@ bitfield_spec = { "bitfield" ~ "<" ~ positive_int_const ~ ("," ~ destination_typ
 // (203)
 destination_type = { boolean_type | octet_type | integer_type }
 // (204)
-bitmask_dcl = { "bitmask" ~ identifier ~ "{" ~ bit_value ~ ("," ~ bit_value)* ~ "}" }
+bitmask_dcl = { annotation_appl* ~ "bitmask" ~ identifier ~ "{" ~ bit_value ~ ("," ~ bit_value)* ~ "}" }
 // (205)
-bit_value = { identifier }
+bit_value = { annotation_appl* ~ identifier }
 // (206) merged to (26)
 // (207) merged to (30)
 // (208)

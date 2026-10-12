@@ -191,3 +191,49 @@ fn adjacent_string_expressions_do_not_accept_other_kinds_or_change_identifier_re
         assert!(syntax::parse(source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn bitmask_annotations_keep_declaration_and_flag_arguments_with_original_spans() {
+    let source = "// 位标志\nconst unsigned short Bound=64; @bit_bound(value=Bound) bitmask Flags { @position(63) high, @position(value=0) low, next };";
+    let nodes: Vec<_> = syntax::parse(source).unwrap().flatten().collect();
+    let annotations: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.as_rule() == Rule::annotation_appl)
+        .collect();
+    assert_eq!(annotations.len(), 3);
+    assert_eq!(annotations[0].as_str(), "@bit_bound(value=Bound)");
+    assert_eq!(annotations[1].as_str(), "@position(63)");
+    assert_eq!(annotations[2].as_str(), "@position(value=0)");
+    let flags: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.as_rule() == Rule::bit_value)
+        .collect();
+    assert_eq!(flags.len(), 3);
+    assert_eq!(flags[0].as_str(), "@position(63) high");
+    for node in nodes {
+        let span = node.as_span();
+        assert_eq!(&source[span.start()..span.end()], node.as_str());
+    }
+}
+#[test]
+fn bitmask_annotation_expressions_and_unannotated_grammar_coexist_without_semantic_validation() {
+    for source in [
+        "bitmask Flags { enabled, ready };",
+        "@bit_bound(8) bitmask Flags { @position((1<<2)) enabled, next };",
+        "module V { const long Bound=64; @::bit_bound(::V::Bound) bitmask Flags {@::position(63) high}; };",
+        "@vendor(mode=TRUE) bitmask Flags {@vendor(7) enabled};",
+        "@bit_bound(0) bitmask Flags {@position(64) high, @position(64) duplicate};",
+    ] {
+        assert!(syntax::parse(source).is_ok(), "{source}");
+    }
+    // These are syntax failures; bounds, duplicates and unknown annotation semantics belong to callers.
+    for source in [
+        "@bit_bound(8) bitmask Flags {};",
+        "bitmask Flags {@position() enabled};",
+        "bitmask Flags {@position(1) enabled,};",
+        "bitmask Flags {@position(1) enabled} trailing;",
+        "bitmask Flags {@position(value=) enabled};",
+    ] {
+        assert!(syntax::parse(source).is_err(), "{source}");
+    }
+}
