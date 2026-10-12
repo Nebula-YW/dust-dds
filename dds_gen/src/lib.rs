@@ -1,3 +1,4 @@
+mod generation_admission;
 mod generator;
 mod parser;
 mod preprocessor;
@@ -19,6 +20,7 @@ pub fn compile_idl(idl_filepath: &Path) -> Result<String, String> {
         .next()
         .expect("Must contain a specification");
 
+    generation_admission::validate(parsed_idl.clone())?;
     let mut output = String::new();
     let mut rust_generator = RustGenerator::new(&mut output);
     rust_generator.generate(parsed_idl);
@@ -33,6 +35,7 @@ pub fn compile_idl_c(idl_filepath: &Path) -> Result<String, String> {
         .next()
         .expect("Must contain a specification");
 
+    generation_admission::validate(parsed_idl.clone())?;
     let mut output = String::new();
     let mut c_generator = CGenerator::new(&mut output);
     c_generator.generate(parsed_idl);
