@@ -408,7 +408,7 @@ struct_dcl = {
 // (46)
 struct_def = { annotation_appl* ~ "struct" ~ identifier ~ /*(195)*/(":" ~ scoped_name)? ~ "{" ~ member* ~ "}" }
 // (47)
-member = { annotation_appl* ~ type_spec ~ declarators ~ ";" }
+member = { annotation_appl* ~ (struct_def | union_def | enum_dcl | type_spec) ~ declarators ~ ";" }
 // (48)
 struct_forward_dcl = { "struct" ~ identifier }
 // (49)
@@ -438,7 +438,7 @@ case_label = {
     | "default" ~ ":"
 }
 // (55)
-element_spec = { annotation_appl* ~ type_spec ~ declarator }
+element_spec = { annotation_appl* ~ (struct_def | union_def | enum_dcl | type_spec) ~ declarator }
 // (56)
 union_forward_dcl = { "union" ~ identifier }
 // (57)
