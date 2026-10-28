@@ -102,9 +102,22 @@ impl UserDefinedDataWriter {
             return;
         };
         self.matched_subscription_list.remove(i);
+        self.transport_writer
+            .delete_matched_reader((*subscription_handle.as_ref()).into());
 
         self.publication_matched_status.current_count = self.matched_subscription_list.len() as i32;
         self.publication_matched_status.current_count_change -= 1;
+
+        // A removed reader can no longer acknowledge changes. Complete pending
+        // waits only when every remaining reliable reader has acknowledged.
+        if self
+            .transport_writer
+            .is_change_acknowledged(self.last_change_sequence_number)
+        {
+            for notification in self.wait_for_acknowledgments_notification.drain(..) {
+                notification.send(Ok(()));
+            }
+        }
     }
 
     pub fn get_offered_deadline_missed_status(&mut self) -> OfferedDeadlineMissedStatus {
@@ -116,3 +129,6 @@ impl UserDefinedDataWriter {
         status
     }
 }
+
+#[cfg(test)]
+mod tests;
