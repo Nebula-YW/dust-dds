@@ -3,7 +3,8 @@ use crate::{
     builtin_topics::BuiltInTopicKey,
     dcps::channels::oneshot::{OneshotReceiver, oneshot},
     infrastructure::qos_policy::DEFAULT_RELIABILITY_QOS_POLICY_DATA_READER_AND_TOPICS,
-    transport::types::{DurabilityKind, ENTITYID_UNKNOWN, Guid, ReaderProxy, ReliabilityKind},
+    rtps::types::{DurabilityKind, ReaderProxy, ReliabilityKind},
+    transport::types::{ENTITYID_UNKNOWN, Guid},
 };
 use core::{
     future::Future,
@@ -59,6 +60,8 @@ fn add_reader(writer: &mut UserDefinedDataWriter, id: u8) -> InstanceHandle {
             group_data: Default::default(),
             representation: Default::default(),
             type_consistency: Default::default(),
+            protection_info: Default::default(),
+            symmetric_cipher: Default::default(),
         });
     writer.publication_matched_status.current_count += 1;
     InstanceHandle::new(key)

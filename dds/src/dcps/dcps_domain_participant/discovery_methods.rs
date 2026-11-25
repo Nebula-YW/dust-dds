@@ -2766,6 +2766,13 @@ impl DcpsDomainParticipant {
 
         let prefix = Guid::from(<[u8; 16]>::from(*handle)).prefix();
 
+        self.domain_participant
+            .discovered_writer_list
+            .retain(|w| w.dds_publication_data.key().value[..12] != prefix);
+        self.domain_participant
+            .discovered_reader_list
+            .retain(|r| r.dds_subscription_data.key().value[..12] != prefix);
+
         for subscriber in &mut self.domain_participant.user_defined_subscriber_list {
             let (subscriber_status_condition, data_reader_list) = (
                 &mut subscriber.status_condition,
@@ -2790,18 +2797,18 @@ impl DcpsDomainParticipant {
 
         for publisher in &mut self.domain_participant.user_defined_publisher_list {
             for data_writer in &mut publisher.data_writer_list {
-                for matched_subscription in &data_writer.matched_subscription_list {
-                    if matched_subscription.key.value[..12] == prefix {
-                        // Remove readers
-                        data_writer
-                            .writer
-                            .transport_writer
-                            .delete_matched_reader(matched_subscription.key.value.into());
-                    }
-                }
-                data_writer
+                let removed_reader_guids: Vec<_> = data_writer
                     .matched_subscription_list
-                    .retain(|subscription| subscription.key.value[..12] != prefix);
+                    .iter()
+                    .filter(|subscription| subscription.key.value[..12] == prefix)
+                    .map(|subscription| subscription.key.value)
+                    .collect();
+                for key in removed_reader_guids {
+                    data_writer.remove_matched_subscription(&InstanceHandle::new(key));
+                    data_writer
+                        .status_condition
+                        .add_communication_state(StatusKind::PublicationMatched);
+                }
             }
         }
 

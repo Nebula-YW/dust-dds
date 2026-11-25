@@ -1075,4 +1075,39 @@ mod tests {
             .count();
         assert_eq!(data_count, 1);
     }
+
+    #[test]
+    fn late_joining_volatile_reliable_reader_does_not_block_prejoin_changes() {
+        let writer_guid = Guid::new([1; 12], EntityId::new([1; 3], 1));
+        let mut writer = RtpsStatefulWriter::new(writer_guid, 500);
+        writer.add_change(CacheChangeWrite {
+            writer_guid,
+            sequence_number: 1,
+            source_timestamp: Time::new(0, 0).into(),
+            inline_qos: ParameterListWrite {
+                kind: ChangeKind::Alive,
+                instance_handle: None,
+                original_writer_info: None,
+                coherent_set: None,
+                group_coherent_set: None,
+                group_seq_num: None,
+                writer_group_info: None,
+            },
+            data_value: vec![1, 2, 3].into(),
+        });
+
+        let reader_guid = Guid::new([2; 12], EntityId::new([2; 3], 2));
+        writer.add_matched_reader(ReaderProxy {
+            remote_reader_guid: reader_guid,
+            remote_group_entity_id: ENTITYID_UNKNOWN,
+            reliability_kind: ReliabilityKind::Reliable,
+            durability_kind: DurabilityKind::Volatile,
+            unicast_locator_list: vec![],
+            multicast_locator_list: vec![],
+            expects_inline_qos: false,
+        });
+
+        assert!(writer.is_change_acknowledged(1));
+        assert!(!writer.is_change_acknowledged(2));
+    }
 }
