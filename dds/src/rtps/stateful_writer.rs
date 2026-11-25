@@ -1096,9 +1096,9 @@ mod tests {
             data_value: vec![1, 2, 3].into(),
         });
 
-        let reader_guid = Guid::new([2; 12], EntityId::new([2; 3], 2));
+        let volatile_reader = Guid::new([2; 12], EntityId::new([2; 3], 2));
         writer.add_matched_reader(ReaderProxy {
-            remote_reader_guid: reader_guid,
+            remote_reader_guid: volatile_reader,
             remote_group_entity_id: ENTITYID_UNKNOWN,
             reliability_kind: ReliabilityKind::Reliable,
             durability_kind: DurabilityKind::Volatile,
@@ -1109,5 +1109,41 @@ mod tests {
 
         assert!(writer.is_change_acknowledged(1));
         assert!(!writer.is_change_acknowledged(2));
+
+        // Idle volatile reader should not trigger periodic heartbeats for pre-join samples.
+        let mut transport = MockTransport::default();
+        writer.write_message(&mut transport, Time::new(1, 0));
+        assert!(transport.submessages.lock().unwrap().is_empty());
+
+        // TransientLocal reader still requires acknowledgment of historical sample 1.
+        let transient_reader = Guid::new([3; 12], EntityId::new([3; 3], 3));
+        writer.add_matched_reader(ReaderProxy {
+            remote_reader_guid: transient_reader,
+            remote_group_entity_id: ENTITYID_UNKNOWN,
+            reliability_kind: ReliabilityKind::Reliable,
+            durability_kind: DurabilityKind::TransientLocal,
+            unicast_locator_list: vec![],
+            multicast_locator_list: vec![],
+            expects_inline_qos: false,
+        });
+        assert!(!writer.is_change_acknowledged(1));
+    }
+
+    #[test]
+    fn reader_proxy_clamps_zero_first_relevant_seq_num_to_zero_acked() {
+        let proxy = RtpsReaderProxy::new(
+            Guid::new([4; 12], EntityId::new([4; 3], 4)),
+            ENTITYID_UNKNOWN,
+            &[],
+            &[],
+            false,
+            true,
+            ReliabilityKind::Reliable,
+            0,
+            DurabilityKind::Volatile,
+            0,
+        );
+        assert!(!proxy.unacked_changes(Some(0)));
+        assert!(proxy.unacked_changes(Some(1)));
     }
 }

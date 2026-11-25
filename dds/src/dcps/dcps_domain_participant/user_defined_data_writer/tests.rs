@@ -76,6 +76,9 @@ fn poll<T>(
 #[test]
 fn removed_subscription_no_longer_blocks_future_acknowledgments() {
     let mut writer = writer();
+    writer
+        .status_condition
+        .set_enabled_statuses([StatusKind::PublicationMatched].iter().collect());
     let reader = add_reader(&mut writer, 1);
     assert!(!writer.transport_writer.is_change_acknowledged(1));
     writer.remove_matched_subscription(&reader);
@@ -83,6 +86,7 @@ fn removed_subscription_no_longer_blocks_future_acknowledgments() {
     assert!(writer.matched_subscription_list.is_empty());
     assert_eq!(writer.publication_matched_status.current_count, 0);
     assert_eq!(writer.publication_matched_status.current_count_change, -1);
+    assert!(writer.status_condition.get_trigger_value());
 }
 
 #[test]
@@ -123,11 +127,15 @@ fn live_unacknowledged_reader_keeps_acknowledgments_pending() {
 #[test]
 fn unknown_and_duplicate_removals_do_not_change_match_counts() {
     let mut writer = writer();
+    writer
+        .status_condition
+        .set_enabled_statuses([StatusKind::PublicationMatched].iter().collect());
     let reader = add_reader(&mut writer, 1);
     writer.remove_matched_subscription(&InstanceHandle::new([9; 16]));
     assert_eq!(writer.publication_matched_status.current_count, 1);
     assert_eq!(writer.publication_matched_status.current_count_change, 0);
     assert!(!writer.transport_writer.is_change_acknowledged(1));
+    assert!(!writer.status_condition.get_trigger_value());
     writer.remove_matched_subscription(&reader);
     writer.remove_matched_subscription(&reader);
     assert_eq!(writer.publication_matched_status.current_count, 0);

@@ -318,7 +318,6 @@ pub struct RtpsUdpTransport {
     fragment_size: usize,
     udp_receive_buffer_size: Option<usize>,
     ip_version: IpVersion,
-    participant_counter: u32,
     reactors: HashMap<Guid, ReactorHandle>,
 }
 
@@ -397,7 +396,6 @@ impl Default for RtpsUdpTransport {
             fragment_size: 1344,
             udp_receive_buffer_size: None,
             ip_version: IpVersion::default(),
-            participant_counter: 0,
             reactors: HashMap::new(),
         }
     }
@@ -519,7 +517,6 @@ impl Transport for RtpsUdpTransport {
         let counter_bytes = PROCESS_PARTICIPANT_COUNTER
             .fetch_add(1, Ordering::Relaxed)
             .to_be_bytes();
-        self.participant_counter = self.participant_counter.wrapping_add(1);
         let guid_prefix: GuidPrefix = [
             host_id[0],
             host_id[1],

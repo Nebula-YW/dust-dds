@@ -1457,17 +1457,7 @@ impl DcpsDomainParticipant {
         else {
             return;
         };
-        if data_writer
-            .matched_subscription_list
-            .iter()
-            .any(|x| subscription_handle.as_ref() == &x.key().value)
-        {
-            data_writer.remove_matched_subscription(&subscription_handle);
-
-            data_writer
-                .status_condition
-                .add_communication_state(StatusKind::PublicationMatched);
-        }
+        data_writer.remove_matched_subscription(&subscription_handle);
     }
 
     #[tracing::instrument(skip(self))]
@@ -2805,9 +2795,6 @@ impl DcpsDomainParticipant {
                     .collect();
                 for key in removed_reader_guids {
                     data_writer.remove_matched_subscription(&InstanceHandle::new(key));
-                    data_writer
-                        .status_condition
-                        .add_communication_state(StatusKind::PublicationMatched);
                 }
             }
         }

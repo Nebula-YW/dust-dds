@@ -107,6 +107,8 @@ impl UserDefinedDataWriter {
 
         self.publication_matched_status.current_count = self.matched_subscription_list.len() as i32;
         self.publication_matched_status.current_count_change -= 1;
+        self.status_condition
+            .add_communication_state(StatusKind::PublicationMatched);
 
         // A removed reader can no longer acknowledge changes. Complete pending
         // waits only when every remaining reliable reader has acknowledged.

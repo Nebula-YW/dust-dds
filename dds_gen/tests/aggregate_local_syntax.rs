@@ -22,7 +22,8 @@ fn full_definitions_keep_direct_member_or_branch_owners_and_utf8_spans() {
             let node = nodes
                 .iter()
                 .find(|n| {
-                    n.as_rule() == owner && (*n).clone().into_inner().any(|c| c.as_str() == definition)
+                    n.as_rule() == owner
+                        && (*n).clone().into_inner().any(|c| c.as_str() == definition)
                 })
                 .unwrap();
             assert_eq!(
