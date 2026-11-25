@@ -86,10 +86,32 @@ pub fn block_on<T>(f: impl Future<Output = T>) -> T {
     })
 }
 
-pub struct Task {
-    future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    task_sender: Sender<Arc<Task>>,
+struct SharedTaskSender {
+    sender: Option<Sender<Arc<Task>>>,
     thread_handle: Thread,
+}
+
+impl SharedTaskSender {
+    fn send(&self, task: Arc<Task>) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(task);
+            self.thread_handle.unpark();
+        }
+    }
+}
+
+impl Drop for SharedTaskSender {
+    fn drop(&mut self) {
+        // Disconnect the channel BEFORE unparking so the executor thread observes
+        // `TryRecvError::Disconnected` and exits cleanly instead of parking forever.
+        self.sender.take();
+        self.thread_handle.unpark();
+    }
+}
+
+pub struct Task {
+    future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
+    task_sender: Arc<SharedTaskSender>,
     finished: AtomicBool,
     is_queued: AtomicBool,
     join_waker: Mutex<Option<Waker>>,
@@ -144,34 +166,28 @@ impl Wake for Task {
 
     fn wake_by_ref(self: &Arc<Self>) {
         if !self.is_finished() && !self.is_queued.swap(true, atomic::Ordering::AcqRel) {
-            self.task_sender.send(self.clone()).unwrap();
-            self.thread_handle.unpark();
+            self.task_sender.send(self.clone());
         }
     }
 }
 
 #[derive(Clone)]
 pub struct ExecutorHandle {
-    task_sender: Sender<Arc<Task>>,
-    thread_handle: Thread,
+    task_sender: Arc<SharedTaskSender>,
 }
 
 impl ExecutorHandle {
     pub fn spawn(&self, f: impl Future<Output = ()> + Send + 'static) -> ExecutorTaskHandle {
         let future = Box::pin(f);
         let task = Arc::new(Task {
-            future: Mutex::new(future),
+            future: Mutex::new(Some(future)),
             task_sender: self.task_sender.clone(),
-            thread_handle: self.thread_handle.clone(),
             finished: AtomicBool::new(false),
             is_queued: AtomicBool::new(true),
             join_waker: Mutex::new(None),
             panic_payload: Mutex::new(None),
         });
-        self.task_sender
-            .send(task.clone())
-            .expect("Should never fail to send");
-        self.thread_handle.unpark();
+        self.task_sender.send(task.clone());
         ExecutorTaskHandle { task }
     }
 }
@@ -373,8 +389,8 @@ impl Timer for TimerHandle {
 }
 
 pub struct Executor {
-    task_sender: Sender<Arc<Task>>,
-    executor_thread_handle: JoinHandle<()>,
+    task_sender: Arc<SharedTaskSender>,
+    _executor_thread_handle: JoinHandle<()>,
     timer_state: Arc<TimerState>,
 }
 
@@ -404,14 +420,21 @@ impl Executor {
                                 let waker = Waker::from(task.clone());
                                 let mut cx = Context::from_waker(&waker);
                                 let poll_result = catch_unwind(AssertUnwindSafe(|| {
-                                    task.future
-                                        .try_lock()
-                                        .expect("Only ever locked here")
-                                        .as_mut()
-                                        .poll(&mut cx)
+                                    let mut guard =
+                                        task.future.try_lock().expect("Only ever locked here");
+                                    match guard.as_mut() {
+                                        Some(future) => future.as_mut().poll(&mut cx),
+                                        None => Poll::Ready(()),
+                                    }
                                 }));
                                 match poll_result {
                                     Ok(Poll::Ready(_)) => {
+                                        let completed = task
+                                            .future
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .take();
+                                        drop(completed);
                                         task.finished.store(true, atomic::Ordering::Release);
                                         if let Some(waker) = task.join_waker.lock().unwrap().take()
                                         {
@@ -420,6 +443,12 @@ impl Executor {
                                     }
                                     Ok(Poll::Pending) => {}
                                     Err(payload) => {
+                                        let completed = task
+                                            .future
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .take();
+                                        let _ = catch_unwind(AssertUnwindSafe(|| drop(completed)));
                                         *task.panic_payload.lock().unwrap() = Some(payload);
                                         task.finished.store(true, atomic::Ordering::Release);
                                         if let Some(waker) = task.join_waker.lock().unwrap().take()
@@ -451,9 +480,13 @@ impl Executor {
             })
             .expect("failed to spawn thread");
 
+        let task_sender = Arc::new(SharedTaskSender {
+            sender: Some(task_sender),
+            thread_handle: executor_thread_handle.thread().clone(),
+        });
         Self {
             task_sender,
-            executor_thread_handle,
+            _executor_thread_handle: executor_thread_handle,
             timer_state,
         }
     }
@@ -461,7 +494,6 @@ impl Executor {
     pub fn handle(&self) -> ExecutorHandle {
         ExecutorHandle {
             task_sender: self.task_sender.clone(),
-            thread_handle: self.executor_thread_handle.thread().clone(),
         }
     }
 

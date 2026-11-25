@@ -17,7 +17,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
     },
     task::{Context, Poll as TaskPoll},
 };
@@ -344,7 +344,7 @@ impl RtpsUdpTransport {
     /// separate message using RTPS data fragments
     pub fn set_fragment_size(&mut self, fragment_size: usize) -> DdsResult<&mut Self> {
         let fragment_size_range = 8..=65000;
-        if !fragment_size_range.contains(&self.fragment_size) {
+        if !fragment_size_range.contains(&fragment_size) {
             return Err(DdsError::BadParameter);
         }
         self.fragment_size = fragment_size;
@@ -375,6 +375,18 @@ impl RtpsUdpTransport {
     /// Get the value of the currently configured IP version
     pub fn ip_version(&self) -> IpVersion {
         self.ip_version
+    }
+}
+
+impl Drop for RtpsUdpTransport {
+    fn drop(&mut self) {
+        for (_, mut reactor) in self.reactors.drain() {
+            reactor.is_running.store(false, Ordering::Relaxed);
+            reactor.waker.wake().ok();
+            if let Some(reactor_thread) = reactor.reactor_thread.take() {
+                reactor_thread.join().ok();
+            }
+        }
     }
 }
 
@@ -502,9 +514,12 @@ impl Transport for RtpsUdpTransport {
                 [0; 4]
             });
 
+        static PROCESS_PARTICIPANT_COUNTER: AtomicU32 = AtomicU32::new(0);
         let app_id = std::process::id().to_ne_bytes();
-        let counter_bytes = self.participant_counter.to_be_bytes();
-        self.participant_counter += 1;
+        let counter_bytes = PROCESS_PARTICIPANT_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .to_be_bytes();
+        self.participant_counter = self.participant_counter.wrapping_add(1);
         let guid_prefix: GuidPrefix = [
             host_id[0],
             host_id[1],

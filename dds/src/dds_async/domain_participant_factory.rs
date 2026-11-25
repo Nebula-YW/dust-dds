@@ -196,7 +196,9 @@ impl DomainParticipantFactoryAsync {
             let span = tracing::trace_span!("dds_factory_loop");
             let _enter = span.enter();
             while run_loop_clone.load(core::sync::atomic::Ordering::Relaxed) {
-                let (user_mail, reply_sender) = rpc_receiver.receive().await;
+                let Some((user_mail, reply_sender)) = rpc_receiver.receive_opt().await else {
+                    break;
+                };
                 let now = clock_clone.now();
                 let reply = domain_participant_factory
                     .handle_factory_mail(
@@ -223,6 +225,29 @@ impl DomainParticipantFactoryAsync {
     pub fn shutdown(&self) {
         self.run_loop
             .store(false, core::sync::atomic::Ordering::Relaxed);
+        self.dcps_sender.close();
         self.worker_task.join();
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::{
+        infrastructure::error::DdsError, rtps_udp_transport::udp_transport::RtpsUdpTransport,
+        std_runtime::StdRuntime,
+    };
+
+    #[test]
+    fn shutdown_unblocks_factory_and_rejects_subsequent_calls() {
+        let factory = DomainParticipantFactoryAsync::new(
+            DustDdsConfiguration::default(),
+            StdRuntime::new(),
+            RtpsUdpTransport::default(),
+            DdsSecurityPlugins::disabled(),
+        );
+        factory.shutdown();
+        let err = crate::std_runtime::executor::block_on(factory.get_qos()).unwrap_err();
+        assert_eq!(err, DdsError::AlreadyDeleted);
     }
 }

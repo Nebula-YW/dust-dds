@@ -16,6 +16,7 @@ struct RpcSlot<Req, Reply> {
     request_id: u64,
     request: Option<Req>,
     reply: Option<Reply>,
+    closed: bool,
 }
 
 struct RpcState<Req, Reply> {
@@ -37,6 +38,7 @@ pub fn rpc_channel_typed<Req, Reply>() -> (RpcClient<Req, Reply>, RpcMailbox<Req
             request_id: 0,
             request: None,
             reply: None,
+            closed: false,
         })),
         request_signal: Channel::new(),
         reply_signal: Channel::new(),
@@ -90,26 +92,43 @@ pub struct RpcMailbox<Req, Reply = DcpsReply> {
 }
 
 impl<Req, Reply> RpcMailbox<Req, Reply> {
+    /// Receives a request from a caller, returning `None` if the channel was closed.
+    pub async fn receive_opt(&self) -> Option<(Req, RpcSender<Req, Reply>)> {
+        loop {
+            let immediate = critical_section::with(|cs| {
+                let mut slot = self.state.slot.borrow(cs).borrow_mut();
+                if slot.closed {
+                    return Some(None);
+                }
+                if let Some(mail) = slot.request.take() {
+                    let _ = self.state.request_signal.try_receive();
+                    return Some(Some((mail, slot.request_id)));
+                }
+                None
+            });
+            match immediate {
+                Some(None) => return None,
+                Some(Some((mail, request_id))) => {
+                    return Some((
+                        mail,
+                        RpcSender {
+                            state: self.state.clone(),
+                            request_id,
+                            sent: false,
+                        },
+                    ));
+                }
+                None => {}
+            }
+            self.state.request_signal.receive().await;
+        }
+    }
+
     /// Receives a request from a caller.
     pub async fn receive(&self) -> (Req, RpcSender<Req, Reply>) {
-        self.state.request_signal.receive().await;
-
-        let (mail, request_id) = critical_section::with(|cs| {
-            let mut slot = self.state.slot.borrow(cs).borrow_mut();
-            let mail = slot
-                .request
-                .take()
-                .expect("request must be present in slot");
-            (mail, slot.request_id)
-        });
-
-        let sender = RpcSender {
-            state: self.state.clone(),
-            request_id,
-            sent: false,
-        };
-
-        (mail, sender)
+        self.receive_opt()
+            .await
+            .expect("RPC mailbox closed unexpectedly")
     }
 }
 
@@ -127,6 +146,20 @@ impl<Req, Reply> Clone for RpcClient<Req, Reply> {
 }
 
 impl<Req, Reply> RpcClient<Req, Reply> {
+    /// Closes the RPC channel, waking both the mailbox actor and any in-flight caller.
+    pub fn close(&self) {
+        if let Some(state) = self.state.upgrade() {
+            critical_section::with(|cs| {
+                let mut slot = state.slot.borrow(cs).borrow_mut();
+                slot.closed = true;
+                slot.request = None;
+                slot.reply = None;
+            });
+            let _ = state.request_signal.try_send(());
+            let _ = state.reply_signal.try_send(());
+        }
+    }
+
     /// Sends an RPC request to the backend actor and awaits its response.
     pub async fn call(&self, mail: Req) -> DdsResult<Reply> {
         let state = self.state.upgrade().ok_or(DdsError::AlreadyDeleted)?;
@@ -138,16 +171,23 @@ impl<Req, Reply> RpcClient<Req, Reply> {
         // Drain any stale reply notification (e.g., if a previous caller was cancelled)
         let _ = state.reply_signal.try_receive();
 
-        // Write request in-place into the pre-allocated slot
-        critical_section::with(|cs| {
+        // Write request in-place into the pre-allocated slot unless closed
+        let closed = critical_section::with(|cs| {
             let mut slot = state.slot.borrow(cs).borrow_mut();
+            if slot.closed {
+                return true;
+            }
             slot.request_id = slot.request_id.wrapping_add(1);
             slot.request = Some(mail);
             slot.reply = None;
+            false
         });
+        if closed {
+            return Err(DdsError::AlreadyDeleted);
+        }
 
         // Notify actor that a request is ready
-        state.request_signal.send(()).await;
+        let _ = state.request_signal.try_send(());
 
         // Await reply notification from actor
         state.reply_signal.receive().await;
